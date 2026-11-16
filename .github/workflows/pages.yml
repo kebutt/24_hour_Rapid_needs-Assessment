@@ -1,0 +1,58 @@
+name: Publish RNA dashboard
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'RNA_Dashboard_GitHub_Ready.zip'
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Prepare dashboard files
+        shell: python
+        run: |
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          import shutil
+          output = Path("_site")
+          output.mkdir()
+          if Path("docs/index.html").is_file():
+              shutil.copytree("docs", output, dirs_exist_ok=True)
+          else:
+              with ZipFile("RNA_Dashboard_GitHub_Ready.zip") as archive:
+                  for item in archive.infolist():
+                      path = PurePosixPath(item.filename)
+                      if path.is_absolute() or ".." in path.parts:
+                          raise ValueError("Unsafe archive path")
+                      if not path.parts or path.parts[0] != "docs" or item.is_dir():
+                          continue
+                      target = output.joinpath(*path.parts[1:])
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(archive.read(item))
+          assert (output / "index.html").is_file(), "Missing dashboard homepage"
+          assert (output / "data/idai-event.json").is_file(), "Missing sample event"
+          print("Dashboard files prepared")
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload website
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4

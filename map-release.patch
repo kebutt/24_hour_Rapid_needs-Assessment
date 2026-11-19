@@ -1,0 +1,442 @@
+--- a/workflow.js
++++ b/workflow.js
+@@ -6,7 +6,7 @@
+  async function request(url,options={}){const r=await fetch(url,{...options,signal:AbortSignal.timeout(45000)});if(!r.ok)throw Error('Data service returned '+r.status+'. Try later or import a prepared file.');const t=await r.text();if(t.length>25*1024*1024)throw Error('Response exceeds demo size limit; use a smaller area or prepared extract.');const j=JSON.parse(t);if(j.remark)throw Error('OSM service returned an incomplete response: '+j.remark);return j;}
+  const status=(id,t)=>$(id).textContent=t;
+- async function file(input){const f=input.files[0];if(!f)return null;if(f.size>25*1024*1024)throw Error('File limit is 25 MB');let j=JSON.parse(await f.text());if(j.type==='Feature')j={type:'FeatureCollection',features:[j]};if(j.type!=='FeatureCollection'||!Array.isArray(j.features))throw Error('Supply a GeoJSON FeatureCollection.');if(j.crs)throw Error('Reproject to WGS84 and remove legacy CRS metadata.');if(j.features.length>15000)throw Error('Demo analysis limit is 15,000 features; simplify or split the extract.');turf.coordEach(j,c=>{if(!Number.isFinite(c[0])||!Number.isFinite(c[1])||Math.abs(c[0])>180||Math.abs(c[1])>90)throw Error('Coordinates must be WGS84 longitude, latitude.');});return j;}
++ async function file(input){const f=input.files[0];if(!f)return null;if(f.size>25*1024*1024)throw Error('File limit is 25 MB');let j=JSON.parse(await f.text());if(j.type==='Feature')j={type:'FeatureCollection',features:[j],metadata:j.metadata};if(j.type!=='FeatureCollection'||!Array.isArray(j.features))throw Error('Supply a GeoJSON FeatureCollection.');if(j.crs)throw Error('Reproject to WGS84 and remove legacy CRS metadata.');if(j.features.length>15000)throw Error('Demo analysis limit is 15,000 features; use GIS processing for the complete AOI and import reviewed event results. Do not truncate the extract to fit.');turf.coordEach(j,c=>{if(!Number.isFinite(c[0])||!Number.isFinite(c[1])||Math.abs(c[0])>180||Math.abs(c[1])>90)throw Error('Coordinates must be WGS84 longitude, latitude.');});return j;}
+  function requirePolygons(j){if(!j?.features.length||j.features.some(f=>!['Polygon','MultiPolygon'].includes(f.geometry?.type)))throw Error('Supply only polygon / multipolygon features.');return j;}
+- function geometryStatus(){status('geometryStatus',`Working AOI: ${work.aoi?.features.length||0} polygon features. Hazard footprint: ${work.hazard?.features.length||0} polygon features.`);if($('setupChecklist'))refreshGuidance();}
++ function geometryStatus(){updateOsmArea();status('geometryStatus',`Working AOI: ${work.aoi?.features.length||0} polygon features. Hazard footprint: ${work.hazard?.features.length||0} polygon features.`);if($('setupChecklist'))refreshGuidance();}
+  async function search(){status('catalogStatus','Searching GDACS…');$('catalogResults').innerHTML='';$('catalogNext').hidden=true;try{
+  const start=$('catalogFrom').value,end=$('catalogTo').value;if(!start||!end||start>end)throw Error('Choose a valid date range.');const q=new URLSearchParams({eventlist:$('catalogHazard').value,fromDate:start,toDate:end,pageSize:'100',pageNumber:String(page)});const country=$('catalogCountry').value.trim().toUpperCase();if(country){if(!/^[A-Z]{3}$/.test(country))throw Error('Use a three-letter country code such as MOZ.');q.set('country',country);}
+@@ -17,5 +17,33 @@
+  }catch(e){status('catalogStatus','Catalogue unavailable: '+e.message+' You can still create an event manually or import an event package.');}}
+  function selectEvent(f){const d=app.template(),p=f.properties;d.event={...d.event,id:'gdacs-'+p.eventtype+'-'+p.eventid,name:p.name,country:p.country||p.iso3||'Region to confirm',hazard:p.eventtype==='TC'?'Cyclone':'Flood',onsetISO:null,cutoffISO:null};d.catalogue={eventtype:p.eventtype,eventid:p.eventid,episodeid:p.episodeid,fromdate:p.fromdate,todate:p.todate,datemodified:p.datemodified,selectedAt:new Date().toISOString()};d.stages.first24.notice='GDACS event selected. Confirm the local trigger and supply eligible hazard evidence; catalogue dates and alert levels do not establish local impacts.';d.sources=[{id:'gdacs',title:p.name,provider:'Global Disaster Alert and Coordination System (GDACS)',url:'https://www.gdacs.org/report.aspx?'+new URLSearchParams({eventtype:p.eventtype,eventid:p.eventid}),referenceDate:p.fromdate,availableDate:p.datemodified,evidenceType:'Event catalogue / alert metadata',limitations:'Latest retrieved catalogue record; may contain later revisions. Not a first-day impact count.'}];d.attribution='GDACS · © OpenStreetMap contributors';app.register(d);$('catalogDialog').close();openAssessment();}
+- function refreshGuidance(){
++ function mapZone(){return /^(moz|mozambique)$/i.test(app.data().event.country||'')?'Africa/Maputo':Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}
++ function wall(ms,z){const parts=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:z,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(ms).map(p=>[p.type,p.value]));return parts.year+'-'+parts.month+'-'+parts.day+'T'+parts.hour+':'+parts.minute+':'+parts.second;}
++ function setManual(id,target){work.inputsEdited=true;const v=$(id).value,z=mapZone(),t=Date.parse(v+'Z');let n=t;if(Number.isFinite(t)){for(let i=0;i<3;i++)n+=t-Date.parse(wall(n,z)+'Z');}$(target).value=Number.isFinite(n)&&wall(n,z).slice(0,16)===v.slice(0,16)?local(new Date(n).toISOString()):'';refreshGuidance();}
++ function showMapTiming(){const z=mapZone(),obs=Date.parse(utc($('hazardTime').value)||''),pub=Date.parse(utc($('hazardAvailable').value)||''),start=Date.parse(utc($('runTrigger').value)||''),end=start+86400000;
++ const label=t=>new Intl.DateTimeFormat('en-GB',{timeZone:z,dateStyle:'medium',timeStyle:'short'}).format(t)+' ('+z+')';
++ $('mapZone').textContent=z;
++ for(const [id,t] of [['mapLocal',obs],['releaseLocal',pub]])if(document.activeElement!==$(id))$(id).value=Number.isFinite(t)?wall(t,z):'';
++ let msg=!work.hazard?.features?.length?'Add a map to check its date.':!Number.isFinite(obs)?'Map date unknown. You can continue preparing the assessment.':($('runStage').value==='forecast'?'Forecast for ': 'Map shows conditions on ')+label(obs)+(Number.isFinite(start)?(obs<start?' · before impact':obs>end?' · after the first 24 hours':' · within the first 24 hours'):'');
++ if(Number.isFinite(obs)&&$('runStage').value==='first24'){if(!Number.isFinite(pub))msg+=' · publication time unknown';else if(pub>end)msg+=' · published too late for the first-day briefing';}
++ $('mapTiming').textContent=msg;}
++ function mapStamp(j,keys){const get=o=>keys.map(k=>o?.[k]).find(v=>typeof v==='string'&&/(?:Z|[+-]\d\d:\d\d)$/i.test(v));const top=get(j.metadata)||get(j.properties);if(top)return RNADates.iso(top);const dates=j.features.map(f=>RNADates.iso(get(f.properties)));return dates.length&&dates[0]&&dates.every(x=>x===dates[0])?dates[0]:null;}
++ function preliminaryReason(){
++  if(!RNADates.iso(utc($('runTrigger').value)))return ['The impact time is not confirmed.','Confirm the local impact time.'];
++  if(work.triggerSuggested&&!$('triggerReview').checked)return ['The catalogue start time has not been confirmed as local impact.','Confirm the local impact time before using the first-day cutoff.'];
++  if(!work.hazard?.features?.length)return ['There is no affected-area map for this assessment view.','Obtain a dated map of the affected area.'];
++  if(!RNADates.iso(utc($('hazardTime').value))||!RNADates.iso(utc($('hazardAvailable').value)))return ['The source does not establish when this map applies and when it became available.','Obtain the map observation and publication times from its provider.'];
++  if(!work.aoi?.features?.length)return ['The assessment boundary is missing.','Add the official or agreed working boundary.'];
++  if(!work.osmLoaded)return ['The infrastructure baseline is not loaded.','Import a prepared OSM extract covering the full assessment boundary, or fetch a baseline.'];
++  if(!$('osmSnapshot').value)return ['The date of the infrastructure baseline is unknown.','Check the extract record for its snapshot time.'];
++  try{readTiming();}catch(e){return [e.message,'Select evidence appropriate to this assessment window or use the later-observations view.'];}
++  if(!$('osmCoverageConfirm').checked)return ['Infrastructure coverage has not been checked.','Verify the extract covers the area and required categories, then confirm coverage.'];
++  if(!$('hazardSource').value.trim())return ['The map source has not been identified.','Enter the provider and what the mapped area represents.'];
++  return null;
++ }
++ function preparedShortcut(){
++   let tip=$('preparedIdaiResults');if(!tip){tip=document.createElement('button');tip.type='button';tip.id='preparedIdaiResults';tip.textContent='View prepared Idai flood results';tip.onclick=()=>{$('assessmentDialog').close();$('later').click();};$('setupEventName').after(tip);}
++   tip.hidden=!(app.data().event.id==='idai-2019'&&app.data().event.isDemo&&app.data().stages.observed?.metrics?.hazardAreaKm2!=null);
++ }
++ function refreshGuidance(){autoMapDates();showMapTiming();
+  const trigger=utc($('runTrigger').value),stage=$('runStage').value,end=RNADates.cutoff(trigger);
+  $('cutoffPreview').textContent=end?new Date(end).toLocaleString('en-GB',{timeZone:'UTC',dateStyle:'medium',timeStyle:'short'})+' UTC':'Choose an event trigger';
+@@ -24,13 +52,14 @@
+  $('osmSnapshotHelp').textContent=work.osmSnapshot?'Restored from the loaded OSM extract. Replace the extract to change its snapshot.':work.snapshotAutomatic?(stage==='first24'?'Suggested for fetching: cutoff or current time, whichever is earlier. An imported file must use its own actual snapshot.':'Suggested for fetching: current time. Choose an older snapshot if your analysis needs a historical baseline.'):'Use the actual snapshot of the imported OSM file, not its download date.';
+  $('osmSnapshot').readOnly=!!work.osmSnapshot;
+- const missing=[['runTrigger','event trigger'],['hazardTime','observation / forecast-valid time'],['hazardAvailable','publication time'],['osmSnapshot','OSM snapshot']].filter(([id])=>!$(id).value).map(([,label])=>label);
++ const missing=[['runTrigger','event trigger'],['osmSnapshot','OSM snapshot']].filter(([id])=>!$(id).value).map(([,label])=>label);
+  $('timingGuidance').className='field-help';
+  if(missing.length)$('timingGuidance').textContent='Still needed: '+missing.join(', ')+'. Unknown source dates are not guessed.';
+- else try{readTiming();$('timingGuidance').className='field-help timing-ok';$('timingGuidance').textContent='Date order fits the selected assessment view. Check the timestamps against their sources.';}catch(e){$('timingGuidance').className='field-help timing-warning';$('timingGuidance').textContent=e.message;}
+- const needs=[];if(missing.length)needs.push('complete source dates');if(work.triggerSuggested&&!$('triggerReview').checked)needs.push('confirm the suggested trigger');if(!$('hazardSource').value.trim())needs.push('describe the hazard source');if(!work.aoi?.features.length)needs.push('add the assessment boundary');if(!work.hazard?.features.length)needs.push('add the hazard footprint');if(!work.osmLoaded)needs.push('add OSM data');if(!$('osmCoverageConfirm').checked)needs.push('check OSM coverage');$('setupChecklist').textContent=needs.length?'Remaining: '+needs.join('; ')+'.':'Inputs supplied. Review the date message above, then calculate the draft briefing.';
++ else if(!$('hazardTime').value||!$('hazardAvailable').value)$('timingGuidance').textContent='You can prepare the other inputs while the map dates are unknown.';else try{readTiming();$('timingGuidance').className='field-help timing-ok';$('timingGuidance').textContent='Date order fits the selected assessment view. Check the timestamps against their sources.';}catch(e){$('timingGuidance').className='field-help timing-warning';$('timingGuidance').textContent=e.message;}
++ const gap=preliminaryReason();$('runAssessment').textContent=gap?'Build preliminary briefing':'Calculate exposure and build briefing';$('setupChecklist').textContent=gap?'You can build a preliminary briefing now. For a quantified exposure estimate: '+gap[1]:'Inputs supplied. Calculate the draft exposure estimate.';
++
+  }
+  function updateAutomaticSnapshot(){if(work.snapshotAutomatic&&!work.osmSnapshot)$('osmSnapshot').value=local(RNADates.snapshot(utc($('runTrigger').value),$('runStage').value));}
+- function openAssessment(){const d=app.data(),defaults=RNADates.defaults(d,app.mode()),m=defaults.stage;work={aoi:structuredClone(d.layers.aoi||empty()),hazard:structuredClone(d.analysisInputs?.stage===m?d.analysisInputs.hazard:d.layers[m]||empty()),osm:structuredClone(d.analysisInputs?.osm||empty()),hazardRevision:d.analysisInputs?.stage===m?d.analysisInputs?.hazardRevision:null,osmLoaded:!!d.analysisInputs?.osm,osmSnapshot:d.analysisInputs?.osmSnapshot||null,triggerSuggested:defaults.triggerSuggested,triggerOrigin:defaults.triggerOrigin,snapshotAutomatic:defaults.snapshotAutomatic};
+- $('setupEventName').textContent=d.event.name+' · '+d.event.country;
++ function openAssessment(){$('mapDates').open=false;const d=app.data(),defaults=RNADates.defaults(d,app.mode()),m=defaults.stage;work={aoi:structuredClone(d.layers.aoi||empty()),hazard:structuredClone(d.analysisInputs?.stage===m?d.analysisInputs.hazard:d.layers[m]||empty()),osm:structuredClone(d.analysisInputs?.osm||empty()),hazardRevision:d.analysisInputs?.stage===m?d.analysisInputs?.hazardRevision:null,osmLoaded:!!d.analysisInputs?.osm,osmSnapshot:d.analysisInputs?.osmSnapshot||null,triggerSuggested:defaults.triggerSuggested,triggerOrigin:defaults.triggerOrigin,snapshotAutomatic:defaults.snapshotAutomatic};
++ $('setupEventName').textContent=d.event.name+' · '+d.event.country;preparedShortcut();
+  $('runStage').value=m;$('runTrigger').value=local(defaults.trigger);$('hazardTime').value=local(defaults.observation);$('hazardAvailable').value=local(defaults.available);$('hazardSource').value=defaults.source;$('osmSnapshot').value=local(defaults.snapshot);$('triggerReview').checked=false;
+  $('hazardTimeHelp').textContent=defaults.observation?'Restored from saved evidence. Check the observation / forecast-valid time for the selected footprint.':'Read the acquisition or forecast-valid time from the hazard product. It cannot be inferred from the event start date.';
+@@ -38,11 +67,74 @@
+  $('osmCoverageConfirm').checked=false;for(const k of ['aoiFile','hazardFile','osmFile'])$(k).value='';$('gdacsGeometryControls').hidden=!d.catalogue;selectedPolygons=[];$('gdacsPolygon').innerHTML='';status('osmStatus',work.osmLoaded?work.osm.features.length+' saved OSM features loaded.':'OSM input not yet loaded.');status('runStatus','');geometryStatus();refreshGuidance();$('assessmentDialog').showModal();}
+  function readTiming(){return RNA.validateTiming({trigger:utc($('runTrigger').value),obs:utc($('hazardTime').value),available:utc($('hazardAvailable').value),snapshot:utc($('osmSnapshot').value),stage:$('runStage').value,revision:work.hazardRevision});}
+- async function fetchOsm(){const button=$('fetchOsm');button.disabled=true;status('osmStatus','Requesting OSM snapshot…');try{requirePolygons(work.aoi);const b=turf.bbox(work.aoi);if(b[2]-b[0]>180||b[3]-b[1]>20||turf.area(turf.bboxPolygon(b))/1e6>2500)throw Error('AOI bounding box exceeds 2,500 km². Import a prepared OSM GeoJSON extract.');const snapshot=utc($('osmSnapshot').value);if(!snapshot||Date.parse(snapshot)>Date.now())throw Error('Choose an OSM snapshot time in the past.');const box=[b[1],b[0],b[3],b[2]].join(',');const q=`[out:json][timeout:35][maxsize:33554432][date:"${snapshot}"];(nwr[building](${box});way[highway](${box});nwr[healthcare](${box});nwr[amenity~"^(hospital|clinic|doctors|health_post|school|kindergarten|college|university|drinking_water|water_point|shelter|social_facility)$"](${box});nwr[man_made~"^(water_well|water_tap|water_works)$"](${box}););out body geom;`;
+- const j=await request('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({data:q})});if(!Array.isArray(j.elements))throw Error('Unexpected OSM response');if(j.elements.length>15000)throw Error('More than 15,000 elements returned. Use a smaller AOI or prepared GIS analysis.');work.osm=osmtogeojson(j,{flatProperties:true});work.osmLoaded=true;work.osmSnapshot=snapshot;work.snapshotAutomatic=false;work.osmRetrievedAt=new Date().toISOString();$('osmCoverageConfirm').checked=false;status('osmStatus',`${work.osm.features.length} OSM features received. Snapshot ${snapshot}. Review coverage before analysis.`);
+- }catch(e){status('osmStatus','OSM request failed: '+e.message+' Existing input retained.');}finally{button.disabled=false;refreshGuidance();}}
++
++ const OSM_MAX_ELEMENTS=15000, OSM_MAX_AREA=50000;
++ let osmFetching=false;
++ function osmQuery(b,snapshot,count=false){
++  const box=[b[1],b[0],b[3],b[2]].join(',');
++  return `[out:json][timeout:35][maxsize:33554432][date:"${snapshot}"];(nwr[building](${box});way[highway](${box});nwr[healthcare](${box});nwr[amenity~"^(hospital|clinic|doctors|health_post|school|kindergarten|college|university|drinking_water|water_point|shelter|social_facility)$"](${box});nwr[man_made~"^(water_well|water_tap|water_works)$"](${box}););${count?'out count;':'out body geom;'}`;
++ }
++ function downloadAoi(){try{
++  requirePolygons(work.aoi);
++  const blob=new Blob([JSON.stringify(work.aoi,null,2)],{type:'application/geo+json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
++  a.href=url;a.download='RNA_Assessment_Boundary.geojson';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
++ }catch(e){status('osmStatus','Add an assessment boundary before downloading it.');}}
++ function updateOsmArea(){
++  if(!$('osmAreaSummary'))return;
++  if(!work.aoi?.features?.length){status('osmAreaSummary','Add an assessment boundary to check its size.');return;}
++  const b=turf.bbox(work.aoi),area=turf.area(turf.bboxPolygon(b))/1e6;
++  status('osmAreaSummary',`Assessment polygon area: ${format(turf.area(work.aoi)/1e6)} km². Download bounding box: ${format(area)} km². `+(area>OSM_MAX_AREA?'This exceeds the 50,000 km² browser request ceiling; use the prepared-data route below.':'The feature count is checked before geometry is downloaded. The complete assessment boundary is retained.'));
++ }
++ async function fetchOsm(){
++  if(osmFetching)return;
++  osmFetching=true;const button=$('fetchOsm'),target=work;button.disabled=true;
++  status('osmStatus','Checking how many OSM elements are available at the selected snapshot…');
++  try{
++   requirePolygons(target.aoi);const boundary=JSON.stringify(target.aoi),b=turf.bbox(target.aoi),area=turf.area(turf.bboxPolygon(b))/1e6;
++   if(b[2]-b[0]>180||b[3]-b[1]>20||area>OSM_MAX_AREA)throw Error(`The download bounding box is ${format(area)} km². Browser requests support up to 50,000 km². Use the prepared-data route below for the complete AOI.`);
++   const snapshot=RNADates.iso(utc($('osmSnapshot').value));if(!snapshot||Date.parse(snapshot)>Date.now())throw Error('Choose an OSM snapshot time in the past.');
++   const options=q=>({method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({data:q})});
++   const stillCurrent=()=>work===target&&JSON.stringify(work.aoi)===boundary&&Date.parse(utc($('osmSnapshot').value))===Date.parse(snapshot);
++   const counts=await request('https://overpass-api.de/api/interpreter',options(osmQuery(b,snapshot,true)));
++   if(!stillCurrent())throw Error('The event, boundary or snapshot changed during the request. Run the check again for the new inputs.');
++   const countRows=counts.elements?.filter(e=>e.type==='count')||[],raw=countRows[0]?.tags?.total;
++   if(countRows.length!==1||!/^\d+$/.test(String(raw??'')))throw Error('The OSM service did not return a complete feature count. No geometry was downloaded.');
++   const count=Number(raw);if(!Number.isSafeInteger(count))throw Error('Invalid OSM feature count.');
++   if(count>OSM_MAX_ELEMENTS)throw Error(`${count.toLocaleString('en')} mapped elements were found in the download bounding box. This exceeds the 15,000-element browser limit. No partial dataset was loaded. Use GIS processing for the full AOI and import reviewed results, or a complete GeoJSON extract within the limits below.`);
++   status('osmStatus',`${count.toLocaleString('en')} mapped elements found across ${format(area)} km². Downloading the complete selection…`);
++   const j=count?await request('https://overpass-api.de/api/interpreter',options(osmQuery(b,snapshot))):{elements:[]};
++   if(!stillCurrent())throw Error('The event, boundary or snapshot changed during the request. Download discarded; run again for the new inputs.');
++   if(!Array.isArray(j.elements)||j.elements.length!==count||j.elements.length>OSM_MAX_ELEMENTS)throw Error('The returned OSM selection is incomplete or differs from its count. It was not loaded.');
++   const converted=osmtogeojson(j,{flatProperties:true});
++   if(converted.type!=='FeatureCollection'||!Array.isArray(converted.features)||converted.features.length>OSM_MAX_ELEMENTS)throw Error('Converted OSM data exceeds the browser analysis limit or is invalid.');
++   target.inputsEdited=true;target.osm=converted;target.osmLoaded=true;target.osmSnapshot=snapshot;target.snapshotAutomatic=false;target.osmRetrievedAt=new Date().toISOString();
++   $('osmCoverageConfirm').checked=false;
++   status('osmStatus',`${converted.features.length.toLocaleString('en')} OSM features received. Snapshot ${snapshot}. Full bounding-box selection downloaded; analysis clips it to your AOI. Check mapping completeness before analysis. Empty or missing OSM features do not prove that no infrastructure exists.`);
++  }catch(e){if(work===target)status('osmStatus','OSM data not loaded: '+e.message+' Existing input retained. If the public service is unavailable, use the prepared-data route below.');}
++  finally{osmFetching=false;button.disabled=false;refreshGuidance();}
++ }
+  async function loadGdacsGeometry(){status('geometryStatus','Loading GDACS geometry choices…');try{const c=app.data().catalogue;const j=await request('https://www.gdacs.org/gdacsapi/api/polygons/getgeometry?'+new URLSearchParams({eventtype:c.eventtype,eventid:c.eventid,episodeid:c.episodeid}));selectedPolygons=(j.features||[]).filter(f=>['Polygon','MultiPolygon'].includes(f.geometry?.type));$('gdacsPolygon').innerHTML=selectedPolygons.map((f,i)=>`<option value="${i}">${esc(f.properties.polygonlabel||f.properties.Class||'Polygon')} · ${esc(f.properties.polygondate||'date unknown')}</option>`).join('');status('geometryStatus',selectedPolygons.length+' polygon options. Select a meaningful hazard threshold; no automatic interpretation is applied.');}catch(e){status('geometryStatus','Geometry unavailable: '+e.message);}}
+- function useGdacs(role){const f=selectedPolygons[Number($('gdacsPolygon').value)];if(!f){status('geometryStatus','Load and select a polygon first.');return;}const g={type:'FeatureCollection',features:[structuredClone(f)]};work[role]=g;if(role==='hazard'){const p=f.properties;work.hazardRevision=RNADates.iso(p.datemodified||app.data().catalogue.datemodified);$('hazardTime').value=local(utc(p.polygondate));$('hazardAvailable').value=local(work.hazardRevision);$('hazardTimeHelp').textContent=$('hazardTime').value?'Filled from GDACS polygon date. Check whether it describes an observation or forecast.':'This polygon has no usable date. Check the original product.';$('hazardAvailableHelp').textContent=$('hazardAvailable').value?'Filled from the GDACS archive revision time, which can be much later than impact. This is a conservative availability limit for replay.':'GDACS supplied no usable revision time; check product availability.';$('hazardSource').value='GDACS '+app.data().catalogue.eventtype+' '+app.data().catalogue.eventid+' · '+(p.polygonlabel||p.Class)+' · confirm forecast/observed meaning';}geometryStatus();}
++ function useGdacs(role){const f=selectedPolygons[Number($('gdacsPolygon').value)];if(!f){status('geometryStatus','Load and select a polygon first.');return;}const g={type:'FeatureCollection',features:[structuredClone(f)]};work[role]=g;work.inputsEdited=true;if(role==='hazard'){const p=f.properties;work.hazardRevision=RNADates.iso(p.datemodified||app.data().catalogue.datemodified);$('hazardTime').value=local(utc(p.polygondate));$('hazardAvailable').value=local(work.hazardRevision);$('hazardTimeHelp').textContent=$('hazardTime').value?'Filled from GDACS polygon date. Check whether it describes an observation or forecast.':'This polygon has no usable date. Check the original product.';$('hazardAvailableHelp').textContent=$('hazardAvailable').value?'Filled from the GDACS archive revision time, which can be much later than impact. This is a conservative availability limit for replay.':'GDACS supplied no usable revision time; check product availability.';$('hazardSource').value='GDACS '+app.data().catalogue.eventtype+' '+app.data().catalogue.eventid+' · '+(p.polygonlabel||p.Class)+' · confirm forecast/observed meaning';}geometryStatus();}
++ function autoMapDates(){
++  const j=work.hazard;if(!j?.features?.length)return;
++  for(const [id,keys] of [['hazardTime',$('runStage').value==='forecast'?['valid_time','forecast_valid_time','observationISO']:['observationISO','acquisition_time','observation_time','datetime','obs_date']],['hazardAvailable',['availableISO','published','publication_time']]]){
++   if(!$(id).value){const stamp=mapStamp(j,keys);if(stamp)$(id).value=local(stamp);}
++  }
++ }
++ function draftBrief(reason,nextStep){
++  const d=app.data(),stage=$('runStage').selectedOptions[0].textContent,trigger=utc($('runTrigger').value),cut=RNADates.cutoff(trigger);
++  const lines=[d.event.name+' · '+d.event.country,stage,cut&&(!work.triggerSuggested||$('triggerReview').checked)?'First-day cutoff: '+cut:'Impact time not confirmed.',reason,'New exposure estimate: not calculated.','Next step: '+nextStep];
++  const saved=d.stages[$('runStage').value];if(!work.inputsEdited&&saved&&Date.parse(trigger)===Date.parse(d.event.onsetISO)){
++   const m=saved.metrics||{},facts=[];
++   for(const [k,label,unit] of [['hazardAreaKm2','Mapped extent',' km²'],['peopleExposed','Potentially exposed population',' people'],['roadsOverlapKm','Road overlap',' km'],['facilitiesExposed','Mapped service overlaps','']])if(Number.isFinite(m[k]))facts.push(label+': '+format(m[k])+unit);
++   const context=(saved.context||[]).map(x=>[x.label+': '+x.value,x.scope,x.note].filter(Boolean).join(' · '));
++   if(facts.length||context.length)lines.splice(2,0,'Previously prepared evidence · '+saved.asOf,...facts,...context);
++  }
++  const box=document.createElement('section');const title=document.createElement('strong');title.textContent='Preliminary briefing ready';box.append(title);
++  for(const line of lines){const p=document.createElement('p');p.textContent=line;box.append(p);}
++  const btn=document.createElement('button');btn.type='button';btn.textContent='Download preliminary briefing';btn.onclick=()=>{const url=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/plain;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download='RNA-preliminary-briefing.txt';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};box.append(btn);$('runStatus').replaceChildren(box);box.tabIndex=-1;box.focus({preventScroll:true});box.scrollIntoView({block:'nearest'});
++ }
+  async function run(){if(busy)return;busy=true;$('runAssessment').disabled=true;status('runStatus','Checking evidence and calculating exposure…');let worker;try{
+- if(work.triggerSuggested&&!$('triggerReview').checked)throw Error('Check the suggested local impact / landfall time and tick its confirmation before running.');const times=readTiming();requirePolygons(work.aoi);requirePolygons(work.hazard);if(!work.osmLoaded)throw Error('Import or fetch OSM first.');if(!$('osmCoverageConfirm').checked)throw Error('Confirm the OSM extract coverage and required categories.');const source=$('hazardSource').value.trim();if(!source)throw Error('Describe the footprint provider, product and threshold.');if(work.osmSnapshot&&Date.parse(times.snapshot)!==Date.parse(work.osmSnapshot))throw Error('The OSM snapshot time differs from the fetched extract. Fetch again with the selected time.');
++ autoMapDates();const gap=preliminaryReason();if(gap){draftBrief(...gap);return;}const times=readTiming();requirePolygons(work.aoi);requirePolygons(work.hazard);const source=$('hazardSource').value.trim();if(work.osmSnapshot&&Date.parse(times.snapshot)!==Date.parse(work.osmSnapshot))throw Error('The OSM snapshot time differs from the fetched extract. Fetch again with the selected time.');
++ if(app.ensureAnalysisInputs)await app.ensureAnalysisInputs();
+  const previous=app.data();const r=await new Promise((resolve,reject)=>{worker=new Worker('analysis-worker.js');const timer=setTimeout(()=>{worker.terminate();reject(Error('Calculation exceeded 60 seconds. Simplify data or use GIS preprocessing.'));},60000);worker.onmessage=e=>{clearTimeout(timer);worker.terminate();e.data.ok?resolve(e.data.result):reject(Error(e.data.error));};worker.onerror=e=>{clearTimeout(timer);worker.terminate();reject(Error(e.message));};worker.postMessage({aoi:work.aoi,hazard:work.hazard,osm:work.osm,districts:previous.layers.districts||empty()});});
+  const d=structuredClone(previous),now=new Date().toISOString();d.event={...d.event,onsetISO:times.trigger,cutoffISO:times.cutoff,triggerConfirmed:true,triggerSource:work.triggerSuggested?'User-confirmed or corrected GDACS suggestion':'User-entered / restored event trigger',isDemo:true};const stale=JSON.stringify(previous.layers.aoi)!==JSON.stringify(work.aoi);
+@@ -62,16 +154,16 @@
+  $('decisionAnswers').innerHTML='<h2>What does this tell us?</h2>'+`<h3>1 · What is the scale?</h3><p>${m.hazardAreaKm2==null?'A usable hazard footprint is still needed.':format(m.hazardAreaKm2)+' km² of mapped hazard extent in the assessment area.'} ${m.peopleExposed==null?'Population exposure remains unknown.':format(m.peopleExposed)+' people potentially exposed; not a confirmed affected count.'}</p><h3>2 · Where and what is exposed?</h3><p>${esc(area?area.name+' · assessment-area portion':d.scope)}. ${m.roadsOverlapKm==null?'Road exposure pending.':format(m.roadsOverlapKm)+' km of roads / paths overlaps.'} ${m.facilitiesExposed==null?'Service exposure pending.':format(m.facilitiesExposed)+' selected mapped service overlaps.'} Use the focus-area selector where administrative breakdowns exist.</p><h3>3 · What comes next?</h3><p>Verify service operation and access; fill population and coverage gaps. Proposed checks are listed below.</p>`+(rows?`<details><summary>OSM exposure breakdown</summary><table><thead><tr><th>OSM elements</th><th>AOI baseline</th><th>Intersecting</th></tr></thead><tbody>${rows}</tbody></table><p>Counts are elements, not deduplicated physical assets or verified damage.</p></details>`:'<p>Detailed OSM categories are not supplied for this view. Prepare / run assessment to calculate them.</p>')+'<h3>What remains unknown?</h3><p>Confirmed damage, casualties, displacement, access and service functionality require validated reports. Child-specific needs cannot be inferred from these exposure totals.</p>';
+  }
+- function init(api){app=api;const now=new Date();$('catalogTo').value=now.toISOString().slice(0,10);$('catalogFrom').value=new Date(now-30*86400000).toISOString().slice(0,10);
++ function init(api){app=api;$('mapLocal').onchange=()=>setManual('mapLocal','hazardTime');$('releaseLocal').onchange=()=>setManual('releaseLocal','hazardAvailable');const now=new Date();$('catalogTo').value=now.toISOString().slice(0,10);$('catalogFrom').value=new Date(now-30*86400000).toISOString().slice(0,10);
+  $('catalogOpen').onclick=()=>$('catalogDialog').showModal();$('catalogForm').onsubmit=e=>{e.preventDefault();page=1;search();};$('catalogNext').onclick=()=>{page++;search();};$('currentAlerts').onclick=()=>{$('catalogFrom').value=new Date(Date.now()-30*86400000).toISOString().slice(0,10);$('catalogTo').value=new Date().toISOString().slice(0,10);page=1;search();};$('assessmentOpen').onclick=openAssessment;
+- for(const [id,key] of [['aoiFile','aoi'],['hazardFile','hazard'],['osmFile','osm']])$(id).onchange=async()=>{try{const j=await file($(id));if(!j)return;if(key!=='osm')requirePolygons(j);work[key]=j;
+- if(key==='hazard'){work.hazardRevision=null;const md=j.metadata||{};$('hazardTime').value=local(RNADates.iso(md.observationISO));$('hazardAvailable').value=local(RNADates.iso(md.availableISO));$('hazardSource').value=typeof md.source==='string'?md.source:'';$('hazardTimeHelp').textContent=$('hazardTime').value?'Filled from this file’s metadata.observationISO. Verify against the product.':'New hazard file: enter its acquisition / forecast-valid time. The previous footprint’s date has been cleared.';$('hazardAvailableHelp').textContent=$('hazardAvailable').value?'Filled from this file’s metadata.availableISO. Verify its publication time.':'New hazard file: enter its release time. The previous footprint’s date has been cleared.';}
++ for(const [id,key] of [['aoiFile','aoi'],['hazardFile','hazard'],['osmFile','osm']])$(id).onchange=async()=>{try{const j=await file($(id));if(!j)return;if(key!=='osm')requirePolygons(j);work[key]=j;work.inputsEdited=true;
++ if(key==='hazard'){work.hazardRevision=null;const md=j.metadata||{};$('hazardTime').value=local(mapStamp(j,['observationISO',...($('runStage').value==='forecast'?['valid_time','forecast_valid_time']:['acquisition_time','observation_time','datetime'])]));$('hazardAvailable').value=local(mapStamp(j,['availableISO','published','publication_time']));$('hazardSource').value=typeof md.source==='string'?md.source:'';$('hazardTimeHelp').textContent=$('hazardTime').value?'Filled from this file’s metadata.observationISO. Verify against the product.':'New hazard file: enter its acquisition / forecast-valid time. The previous footprint’s date has been cleared.';$('hazardAvailableHelp').textContent=$('hazardAvailable').value?'Filled from this file’s metadata.availableISO. Verify its publication time.':'New hazard file: enter its release time. The previous footprint’s date has been cleared.';}
+  if(key==='osm'){work.osmLoaded=true;work.osmSnapshot=RNADates.iso(j.metadata?.osmSnapshot);work.osmRetrievedAt=null;work.snapshotAutomatic=false;$('osmSnapshot').value=local(work.osmSnapshot);$('osmCoverageConfirm').checked=false;status('osmStatus',j.features.length+' OSM features imported. '+(work.osmSnapshot?'Snapshot restored from file metadata.':'Enter the actual snapshot from the export record; the suggested fetch date has been cleared.'));}geometryStatus();}catch(e){status('runStatus','Input rejected: '+e.message);}};
+- $('runStage').onchange=()=>{const d=app.data(),m=$('runStage').value;if(d.layers[m]?.features?.length){work.hazard=structuredClone(d.analysisInputs?.stage===m?d.analysisInputs.hazard:d.layers[m]);work.hazardRevision=d.analysisInputs?.stage===m?d.analysisInputs?.hazardRevision:null;const e=d.stages[m]?.evidence||{};$('hazardTime').value=local(e.observationISO);$('hazardAvailable').value=local(e.availableISO);$('hazardSource').value=e.source||'';}updateAutomaticSnapshot();geometryStatus();};
+- $('runTrigger').oninput=()=>{if(work.triggerSuggested)$('triggerReview').checked=false;updateAutomaticSnapshot();refreshGuidance();};
+- $('osmSnapshot').oninput=()=>{work.snapshotAutomatic=false;refreshGuidance();};
+- for(const id of ['hazardTime','hazardAvailable','hazardSource'])$(id).oninput=refreshGuidance;
++ $('runStage').onchange=()=>{const d=app.data(),m=$('runStage').value;if(d.layers[m]?.features?.length){work.hazard=structuredClone(d.analysisInputs?.stage===m?d.analysisInputs.hazard:d.layers[m]);work.hazardRevision=d.analysisInputs?.stage===m?d.analysisInputs?.hazardRevision:null;const e=d.stages[m]?.evidence||{};$('hazardTime').value=local(e.observationISO);$('hazardAvailable').value=local(e.availableISO);$('hazardSource').value=e.source||'';}else{work.hazard=empty();work.hazardRevision=null;for(const id of ['hazardTime','hazardAvailable','hazardSource'])$(id).value='';}updateAutomaticSnapshot();geometryStatus();};
++ $('runTrigger').oninput=()=>{work.inputsEdited=true;if(work.triggerSuggested)$('triggerReview').checked=false;updateAutomaticSnapshot();refreshGuidance();};
++ $('osmSnapshot').oninput=()=>{work.inputsEdited=true;work.snapshotAutomatic=false;refreshGuidance();};
++ for(const id of ['hazardTime','hazardAvailable','hazardSource'])$(id).oninput=()=>{work.inputsEdited=true;refreshGuidance();};
+  for(const id of ['triggerReview','osmCoverageConfirm'])$(id).onchange=refreshGuidance;
+  $('newOnset').addEventListener('input',()=>{const end=RNADates.cutoff(utc($('newOnset').value));$('newCutoffPreview').textContent=end?new Date(end).toLocaleString('en-GB',{timeZone:'UTC',dateStyle:'medium',timeStyle:'short'})+' UTC':'Choose an event trigger';});
+- $('fetchOsm').onclick=fetchOsm;$('loadGdacsGeometry').onclick=loadGdacsGeometry;$('useGdacsAoi').onclick=()=>useGdacs('aoi');$('useGdacsHazard').onclick=()=>useGdacs('hazard');$('runAssessment').onclick=run;
++ $('fetchOsm').onclick=fetchOsm;$('downloadOsmAoi').onclick=downloadAoi;$('loadGdacsGeometry').onclick=loadGdacsGeometry;$('useGdacsAoi').onclick=()=>useGdacs('aoi');$('useGdacsHazard').onclick=()=>useGdacs('hazard');$('runAssessment').onclick=run;
+  }
+  return {init,answers};
+--- a/app.js
++++ b/app.js
+@@ -10,5 +10,6 @@
+ const area=()=>D.districts.find(x=>x.id===focus), stage=()=>D.stages[mode];
+ const metrics=()=>area()?area().metrics?.[mode]||{}:stage().metrics;
+-const has=n=>!!D.layers[n]?.features?.length;
++const tileObservation=()=>D===bundledSample&&needsLater&&!!window.RNATileOverlay?.make;
++const has=n=>(n==='observed'&&tileObservation())||!!D.layers[n]?.features?.length;
+ const showToast=t=>{$('toast').textContent=t;$('toast').hidden=false;setTimeout(()=>$('toast').hidden=true,4000);};
+ const priorities=()=>change?[
+@@ -30,9 +31,10 @@
+  card(D.hazardLabel,fmt(m.hazardAreaKm2,1),'Extent interpretation; not verified damage','km²')+card('People potentially exposed',fmt(m.peopleExposed),D.populationNote)+card('Roads / paths overlapping',fmt(m.roadsOverlapKm,1),'Exposure only; closures require verification','km')+card('Mapped service overlaps',fmt(m.facilitiesExposed),'Incomplete inventory; functionality requires verification');
+  $('mapTitle').textContent=change?'How did the mapped extent change?':early?'Where should verification begin?':forecast?'Where could impacts occur?':'Where is potential exposure concentrated?';
++ $('mappedIdai').hidden=!(D===bundledSample&&early&&!has('first24'));$('mappedIdai').onclick=()=>$('later').click();
+  $('mapDate').textContent=change?c.baselineDate+' → '+c.observationDate:s.asOf;
+  $('scopeNote').textContent=change?fmt(c.comparisonAreaKm2,1)+' km² common comparison coverage':area()?area().name+' · assessment-area portion':D.scope;
+  $('mapMessage').hidden=has('aoi')&&!change&&has(mode);$('mapMessage').textContent=!has('aoi')?'No assessment boundary supplied · import event data':change?'Mapped differences are not verified damage':D.boundaryNote;
+- $('facilityControl').hidden=(early&&!s.evidence)||change||!has('facilities');
+- $('legend').innerHTML='<strong>MAP KEY</strong>'+(change?'<div><i class="swatch" style="background:#ce6b55"></i>Later observation only</div><div><i class="swatch" style="background:#2c8a9f"></i>Both observations</div><div><i class="swatch" style="background:#c4a33e"></i>Earlier observation only</div>':has(mode)?`<div><i class="swatch" style="background:#2c8a9f"></i>${esc(D.hazardLabel)}</div>`:'')+(has('aoi')?`<div><i class="swatch boundary"></i>${change?'Common observation coverage':'Working assessment boundary'}</div>`:'<div>No event layers supplied</div>')+(!change&&$('facilities').checked?'<div><i class="swatch" style="background:#cb4b4b;border-radius:50%;width:8px;height:8px"></i>Service location</div>':'');
++ $('opacityLabel').hidden=!change&&!has(mode);$('facilityControl').hidden=(early&&!s.evidence)||change||!has('facilities');
++ $('legend').innerHTML='<strong>MAP KEY</strong>'+(change?'<div><i class="swatch" style="background:#c04d21"></i>Later observation only</div><div><i class="swatch" style="background:#17768d"></i>Both observations</div><div><i class="swatch" style="background:#927430"></i>Earlier observation only</div>':has(mode)?`<div><i class="swatch" style="background:#17768d"></i>${esc(D.hazardLabel)}</div>`:'')+(has('aoi')?`<div><i class="swatch boundary"></i>${change?'Common observation coverage':'Working assessment boundary'}</div>`:'<div>No event layers supplied</div>')+(!change&&$('facilities').checked?'<div><i class="swatch" style="background:#cb4b4b;border-radius:50%;width:8px;height:8px"></i>Service location</div>':'');
+  const ps=priorities();document.querySelector('.aside-title h2').textContent=ps.length===3?'Three priority checks':`${ps.length||'No'} priority check${ps.length===1?'':'s'}`;
+  $('priorities').innerHTML=ps.map((p,i)=>`<article class="priority"><div class="priority-top"><span class="number">0${i+1}</span><h3><button data-priority="${i}" ${Number.isFinite(p.lat)&&Number.isFinite(p.lon)?'':'disabled'}>${esc(p.location)}</button></h3></div><span class="status">${esc(p.evidenceStatus)}</span><p>${esc(p.finding)}</p><p class="action">${esc(p.action)}</p>${p.owner?`<p>Lead: ${esc(p.owner)}</p>`:''}</article>`).join('')||'<p class="priority">No reviewed priorities supplied. Agree the first checks with the coordination team.</p>';
+@@ -41,14 +43,53 @@
+ }
+ function geo(name,opt={}){return L.geoJSON(D.layers[name]||empty(),opt);}
++const referenceFiles=new Map();
++let baseLayer=null,baseWait=null,baseRevision=0,referenceDetail=null;
++function selectBase(){
++ const choice=$('baseChoice'),status=$('baseStatus'),thisMap=map,rev=++baseRevision;
++ clearTimeout(baseWait);if(baseLayer){map.removeLayer(baseLayer);baseLayer=null;}
++ map.getContainer().classList.toggle('street-mode',choice.value==='streets');
++ if(referenceDetail){if(choice.value==='streets')map.removeLayer(referenceDetail);else referenceDetail.addTo(map);}
++ if(choice.value!=='streets'){status.textContent='Packaged reference · no external tiles.';return;}
++ status.textContent='Loading current streets…';
++ const osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{pane:'streetTiles',maxZoom:19,keepBuffer:1,updateWhenIdle:true,referrerPolicy:'strict-origin-when-cross-origin',attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>'});baseLayer=osm;
++ let loaded=0,failed=0;
++ const current=()=>rev===baseRevision&&thisMap===map&&baseLayer===osm;
++ const fallback=()=>{if(!current()||loaded)return;choice.value='reference';selectBase();status.textContent='Street tiles unavailable · showing the packaged reference.';};
++ osm.on('tileload',()=>{if(!current())return;loaded++;clearTimeout(baseWait);status.textContent='Current streets · reference only, not a disaster observation.';});
++ osm.on('tileerror',()=>{if(current())failed++;});
++ osm.on('load',()=>{if(current()&&failed&&!loaded)fallback();});
++ baseWait=setTimeout(fallback,12000);osm.addTo(map);
++}
++function addReferenceDetail(){
++ if(D.event.id!=='idai-2019')return;
++ const target=map,detail=referenceDetail;
++ for(const name of ['places','rivers']){
++  if(!referenceFiles.has(name))referenceFiles.set(name,fetch('data/'+name+'.geojson').then(r=>{if(!r.ok)throw Error('Reference layer unavailable');return r.json();}).catch(()=>null));
++  referenceFiles.get(name).then(data=>{if(!data||map!==target||referenceDetail!==detail)return;
++   if(name==='rivers'){L.geoJSON(data,{pane:'hydro',interactive:false,style:{color:'#83b5bf',weight:1.5,opacity:.85}}).addTo(detail);return;}
++   for(const f of data.features.filter(f=>f.geometry?.type==='Point'&&['city','town'].includes(f.properties?.place))){
++    const xy=f.geometry.coordinates,l=L.circleMarker([xy[1],xy[0]],{pane:'settlements',interactive:false,radius:3.2,weight:1.5,color:'#fff',fillColor:'#314a53',fillOpacity:1}).addTo(detail);l.bindTooltip(esc(f.properties.name),{permanent:true,direction:'right',offset:[4,0],className:'place-label',pane:'placeNames'});}
++  });
++ }
++}
++function updateOpacity(){const v=Number($('hazardOpacity').value)/100;for(const name of ['first24','forecast','observed','change_new','change_persistent','change_receded'])groups[name]?.setStyle({fillOpacity:v});}
+ function buildMap(){
+- if(map)map.remove();if(inset)inset.remove();groups={};districtLayers={};
++ ++baseRevision;clearTimeout(baseWait);baseLayer=null;referenceDetail=null;if(map)map.remove();if(inset)inset.remove();groups={};districtLayers={};
+  map=L.map('map',{preferCanvas:true,zoomSnap:.25,zoomDelta:.5,minZoom:1,maxZoom:17,scrollWheelZoom:false}).setView([0,0],2);
+- ['land','flood','boundary','facilities'].forEach((n,i)=>{map.createPane(n);map.getPane(n).style.zIndex=200+i*100;});
++ for(const [name,z] of Object.entries({land:210,streetTiles:225,hydro:240,flood:300,boundary:400,settlements:425,placeNames:440,facilities:500})){map.createPane(name).style.zIndex=z;} referenceDetail=L.layerGroup();$('baseChoice').onchange=selectBase;$('hazardOpacity').oninput=updateOpacity;
++ selectBase();addReferenceDetail();
+  geo('context',{pane:'land',interactive:false,style:{fillColor:'#f2f1e9',fillOpacity:1,color:'#bdcbd0',weight:1}}).addTo(map);
+  groups.aoi=geo('aoi',{pane:'boundary',interactive:false,style:{color:'#575768',weight:1.7,dashArray:'6 4',fillOpacity:0}});
+  groups.districts=geo('districts',{pane:'boundary',style:{color:'#73808b',weight:1,fillOpacity:.025},onEachFeature:(f,l)=>{const id=f.properties.id;districtLayers[id]=l;l.bindTooltip(esc(f.properties.name),{className:'district-label',direction:'center',permanent:true});l.on('click',()=>{if(change||!D.districts.some(d=>d.id===id))return;focus=id;$('district').value=id;render();fit();l.bindPopup(`<strong>${esc(area().name)}</strong><p>${esc(fmt(metrics().peopleExposed))} potentially exposed people.</p><small>Assessment-area portion only. Exposure is not verified need.</small>`).openPopup();});}});
+- for(const n of ['first24','forecast','observed','change_new','change_persistent','change_receded'])groups[n]=geo(n,{pane:'flood',interactive:false,style:{weight:0,fillColor:n==='change_new'?'#ce6b55':n==='change_receded'?'#c4a33e':'#2c8a9f',fillOpacity:.7}});
++ for(const n of ['first24','forecast','observed','change_new','change_persistent','change_receded'])groups[n]=geo(n,{pane:'flood',interactive:false,style:{weight:0,fillColor:n==='change_new'?'#c04d21':n==='change_receded'?'#927430':'#17768d',fillOpacity:Number($('hazardOpacity').value)/100}});
++ if(tileObservation()){
++  const origin=D;let attempted=false;
++  groups.observed=RNATileOverlay.make(L,{opacity:Number($('hazardOpacity').value)/100,onError:()=>{
++    if(attempted||D!==origin||mode!=='observed'||change||!needsLater)return;
++    attempted=true;waitForLayers(()=>{}).finally(()=>{attempted=false;});
++  }});
++ }
+  groups.change_coverage=geo('change_coverage',{pane:'boundary',interactive:false,style:{color:'#575768',weight:2,dashArray:'6 4',fillOpacity:0}});
+- L.control.scale({imperial:false,maxWidth:110}).addTo(map);map.attributionControl.setPrefix(esc(D.attribution));
++ L.control.scale({imperial:false,maxWidth:110}).addTo(map);map.attributionControl.setPrefix(false);map.attributionControl.addAttribution(esc(D.attribution).replace('© OpenStreetMap contributors','© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'));
+  inset=L.map('locatorMap',{zoomControl:false,attributionControl:false,scrollWheelZoom:false,dragging:false,doubleClickZoom:false,boxZoom:false,touchZoom:false,keyboard:false}).setView([0,0],1);
+  geo('context',{interactive:false,style:{color:'#aabac2',weight:.5,fillColor:'#e5e9e7',fillOpacity:1}}).addTo(inset);
+@@ -86,14 +127,33 @@
+ }
+ function register(data){RNA.validate(data);const previous=D,previousKey=$('eventSelect').value,key='event-'+crypto.randomUUID();events.set(key,data);try{activate(data,key);}catch(e){events.delete(key);activate(previous,previousKey);throw e;}return key;}
++// The first-day view doesn't need the heavy satellite / change polygons.
++let bundledSample,needsLater=false,laterLoading=null,actionSequence=0;
++async function ensureAnalysisInputs(){if(D!==bundledSample||!needsLater)return;let ready=false;await waitForLayers(()=>{ready=true;});if(!ready)throw Error('Detailed map layers are unavailable. Your inputs have been kept. Check your connection and try again.');}
++async function jsonAsset(path){const res=await fetch(path);if(!res.ok)throw Error('Could not load '+path+' ('+res.status+').');return res.json();}
++async function readSample(){try{const d=await jsonAsset('data/idai-first-day-v1.json');RNA.validate(d);needsLater=true;return d;}catch(e){const d=await jsonAsset('data/idai-event.json');RNA.validate(d);needsLater=false;return d;}}
++async function waitForLayers(action){const requested=D,seq=++actionSequence;if(requested===bundledSample&&needsLater){
++ $('eventStatus').textContent='Loading detailed map layers…';
++ try{if(!laterLoading)laterLoading=(async()=>{const later=await jsonAsset('data/idai-later-layers-v1.json');const names=['observed','change_new','change_persistent','change_receded'];for(const k of names)if(!later[k]?.features?.length)throw Error('Missing detailed layer: '+k);const d={...bundledSample,layers:{...bundledSample.layers,...Object.fromEntries(names.map(k=>[k,later[k]]))}};RNA.validate(d);bundledSample.layers=d.layers;needsLater=false;if(D===bundledSample){buildMap();render();fit();$('eventStatus').textContent='Historical sample · replace with your event data.';}})();await laterLoading;
++ }catch(e){if(D===requested&&seq===actionSequence)$('eventStatus').textContent='Detailed map layers could not load. Check your connection and select the action again. The first-day briefing is still available.';return;}finally{laterLoading=null;}
++ if(D!==requested||seq!==actionSequence)return;
++ }if(D===requested&&seq===actionSequence)action();}
+ async function init(){
+- try{const [sample,t]=await Promise.all(['data/idai-event.json','downloads/Event_Template.json'].map(async p=>{const r=await fetch(p);if(!r.ok)throw Error('Event package unavailable');return r.json();}));template=t;RNA.validate(sample);events.set('sample',sample);activate(sample,'sample');['eventSelect','fit','print','download'].forEach(id=>$(id).disabled=false);
+- $('forecast').onclick=()=>setMode('forecast');$('early').onclick=()=>setMode('first24');$('later').onclick=()=>setMode('observed');$('eventSelect').onchange=e=>activate(events.get(e.target.value),e.target.value);
+- $('district').onchange=e=>{focus=e.target.value;map.closePopup();render();fit();};$('fit').onclick=fit;$('change').onclick=()=>{change=!change;focus='all';$('district').value='all';$('facilities').checked=false;map.closePopup();render();fit();};$('facilities').onchange=render;$('download').onclick=csv;$('print').onclick=()=>window.print();
+- $('exportEvent').onclick=()=>{download(JSON.stringify(D,null,2),filename()+'_event.json','application/json');showToast('Event package exported, including supplied map layers.');};
++ const initButtons=['catalogOpen','newEvent','importEvent','assessmentOpen','early','later','sources','exportEvent'];initButtons.forEach(id=>$(id).disabled=true);
++ try{const sample=await readSample();template={"schemaVersion":1,"event":{"id":"new-event","name":"New event","country":"Country / region","hazard":"Flood or cyclone","onsetISO":null,"cutoffISO":null,"isDemo":true,"reviewer":"Assessment coordination team"},"scope":"Define the assessment area","boundaryNote":"Assessment boundary and source pending. A working boundary is not proof of impact.","hazardLabel":"Mapped hazard extent","populationNote":"Specify population dataset, reference year, method and limitations. Exposure is not confirmed impact.","facilityNote":"Specify inventory date, coverage and verification status.","attribution":"Add map data providers and required attribution","stages":{"first24":{"asOf":"Information cutoff not set","notice":"New event workspace. Import reviewed event data to populate this briefing. Unknown does not mean zero.","metrics":{"hazardAreaKm2":null,"peopleExposed":null,"roadsOverlapKm":null,"facilitiesExposed":null},"context":[]}},"districts":[],"priorities":[],"sources":[],"methods":["Use Prepare / run assessment to calculate OSM exposure from a valid hazard footprint and complete baseline extract. Population overlays and change detection require separately reviewed analysis. Record all sources, dates, coverage limitations and analyst checks."],"change":{"available":false},"layers":{"aoi":{"type":"FeatureCollection","features":[]},"districts":{"type":"FeatureCollection","features":[]},"context":{"type":"FeatureCollection","features":[]},"observed":{"type":"FeatureCollection","features":[]},"facilities":{"type":"FeatureCollection","features":[]},"change_new":{"type":"FeatureCollection","features":[]},"change_persistent":{"type":"FeatureCollection","features":[]},"change_receded":{"type":"FeatureCollection","features":[]},"change_coverage":{"type":"FeatureCollection","features":[]},"first24":{"type":"FeatureCollection","features":[]}}};bundledSample=sample;events.set('sample',sample);activate(sample,'sample');['eventSelect','fit','print','download',...initButtons].forEach(id=>$(id).disabled=false);
++ $('forecast').onclick=()=>setMode('forecast');$('early').onclick=()=>{actionSequence++;setMode('first24');};$('later').onclick=()=>tileObservation()?(++actionSequence,setMode('observed')):waitForLayers(()=>setMode('observed'));$('eventSelect').onchange=e=>activate(events.get(e.target.value),e.target.value);
++ $('district').onchange=e=>{focus=e.target.value;map.closePopup();render();fit();};$('fit').onclick=fit;$('change').onclick=()=>waitForLayers(()=>{change=!change;focus='all';$('district').value='all';$('facilities').checked=false;map.closePopup();render();fit();});$('facilities').onchange=render;$('download').onclick=csv;$('print').onclick=()=>window.print();
++ $('exportEvent').onclick=()=>waitForLayers(()=>{download(JSON.stringify(D,null,2),filename()+'_event.json','application/json');showToast('Event package exported, including supplied map layers.');});
+  $('importEvent').onclick=()=>$('eventFile').click();$('eventFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{if(f.size>25*1024*1024)throw Error('File is larger than 25 MB. Simplify display geometries before importing.');const d=JSON.parse(await f.text());register(d);showToast('Event imported. Check sources and figures before use.');}catch(err){$('eventStatus').className='error';$('eventStatus').textContent='Import rejected: '+err.message+' Current event retained.';}finally{e.target.value='';}};
+  $('newEvent').onclick=()=>$('newDialog').showModal();$('newForm').onsubmit=e=>{e.preventDefault();const d=structuredClone(template);d.event.name=$('newName').value.trim();d.event.country=$('newCountry').value.trim();d.event.hazard=$('newHazard').value;d.event.id='event-'+crypto.randomUUID();d.event.onsetISO=new Date($('newOnset').value+'Z').toISOString();d.event.cutoffISO=new Date(Date.parse(d.event.onsetISO)+86400000).toISOString();d.stages.first24.asOf='Cutoff: '+date(d.event.cutoffISO);register(d);$('newDialog').close();showToast('Empty event created. Export it to add reviewed data.');};
+- RNAWorkflow.init({data:()=>D,mode:()=>mode,template:()=>structuredClone(template),register,save:(d,m)=>{register(d);setMode(m);}});
++ RNAWorkflow.init({ensureAnalysisInputs,data:()=>D,mode:()=>mode,template:()=>structuredClone(template),register,save:(d,m)=>{register(d);setMode(m);}});
++ const prepare=$('assessmentOpen').onclick;$('assessmentOpen').onclick=()=>mode==='observed'?waitForLayers(prepare):prepare();
++ const chooseStage=$('runStage').onchange;$('runStage').onchange=async()=>{
++  if($('runStage').value==='observed'&&D===bundledSample&&needsLater){
++   $('runStatus').textContent='Loading the map for later observations…';$('runAssessment').disabled=true;
++   try{await ensureAnalysisInputs();$('runStatus').textContent='';}catch(e){$('runStatus').textContent=e.message;}finally{$('runAssessment').disabled=false;}
++  }chooseStage();
++ };
+  for(const name of ['beforeprint','afterprint'])window.addEventListener(name,()=>{map.invalidateSize({animate:false});fit();inset.invalidateSize({animate:false});});
+- }catch(e){$('notice').textContent='Could not load the event package: '+e.message;console.error(e);}
++ }catch(e){$('notice').textContent='The event could not open. Check your connection, then reload the dashboard.';$('eventStatus').textContent=e.message+' ';const retry=document.createElement('button');retry.type='button';retry.textContent='Reload dashboard';retry.onclick=()=>location.reload();$('eventStatus').append(retry);console.error(e);}
+ }
+ function setMode(next){if(!D.stages[next])return;mode=next;change=false;focus='all';$('district').value='all';$('facilities').checked=false;map.closePopup();render();fit();}
+--- a/index.html
++++ b/index.html
+@@ -6,5 +6,5 @@
+ <meta name="description" content="Reusable event briefing: geographic scope, exposure evidence and priority verification within 24 hours.">
+ <link rel="stylesheet" href="vendor/leaflet.css"><link rel="stylesheet" href="style.css">
+-<script src="vendor/leaflet.js" defer></script><script src="vendor/turf.js" defer></script><script src="vendor/osmtogeojson.js" defer></script><script src="date-defaults.js" defer></script><script src="workflow.js" defer></script><script src="validate.js" defer></script><script src="app.js" defer></script>
++<script src="vendor/leaflet.js" defer></script><script src="vendor/turf.js" defer></script><script src="vendor/osmtogeojson.js" defer></script><script src="date-defaults.js" defer></script><script src="workflow.js" defer></script><script src="validate.js" defer></script><script src="observed-tiles.js" defer></script><script src="app.js" defer></script>
+ </head>
+ <body>
+@@ -13,6 +13,6 @@
+ <div id="notice" class="notice" role="status">Loading event evidence…</div>
+ <section id="metrics" class="metrics" aria-label="Key figures"></section>
+-<section id="decisionAnswers" class="decision-answers"></section><aside><div class="aside-title"><p class="eyebrow">THE NEXT MOVE</p><h2>Three priority checks</h2><p>Proposed actions for coordination review.</p></div><div id="priorities" class="priorities"></div><div class="signoff">Review with <strong id="reviewer">Assessment coordination team</strong> before operational use.</div></aside><footer><span id="footerNote"></span><button id="download" disabled>Download this briefing’s data ↓</button><p class="developer-credit">Developed with <span role="img" aria-label="love">❤️</span> by <strong>Duncan Kebut</strong></p></footer></div><main class="map-stage"><section class="map-panel"><div class="map-head"><div><h2 id="mapTitle">Where should verification begin?</h2><p id="mapDate">First-day evidence</p></div><div class="map-actions"><button id="change" disabled>Compare observations</button><button id="fit" disabled>Fit area</button></div></div>
+-<div class="map-wrap"><div id="map" aria-label="Interactive assessment map"></div><div class="north" aria-label="North">N<span>↑</span></div><div class="legend" id="legend"></div><div id="mapMessage" class="map-message">Reference area only · impact footprint pending</div><div class="locator" aria-label="Locator map"><div id="locatorMap"></div><span id="locatorLabel">LOCATION</span></div></div>
++<section id="decisionAnswers" class="decision-answers"></section><aside><div class="aside-title"><p class="eyebrow">THE NEXT MOVE</p><h2>Three priority checks</h2><p>Proposed actions for coordination review.</p></div><div id="priorities" class="priorities"></div><div class="signoff">Review with <strong id="reviewer">Assessment coordination team</strong> before operational use.</div></aside><footer><span id="footerNote"></span><button id="download" disabled>Download this briefing’s data ↓</button><p class="developer-credit">Developed with <span role="img" aria-label="love">❤️</span> by <strong>Duncan Kebut</strong></p></footer></div><main class="map-stage"><section class="map-panel"><div class="map-head"><div><h2 id="mapTitle">Where should verification begin?</h2><p id="mapDate">First-day evidence</p></div><div class="map-actions"><button type="button" id="mappedIdai" hidden>View 20 March flood map</button><button id="change" disabled>Compare observations</button><button id="fit" disabled>Fit area</button></div></div>
++<div class="map-toolstrip"><label>Background map <select id="baseChoice"><option value="reference">Assessment reference</option><option value="streets">OpenStreetMap streets</option></select></label><span id="baseStatus" role="status">Packaged reference · no external tiles.</span><label id="opacityLabel" hidden>Map overlay <input type="range" id="hazardOpacity" min="25" max="90" step="5" value="65" aria-label="Hazard overlay opacity"></label></div><div class="map-wrap"><div id="map" aria-label="Interactive assessment map"></div><div class="north" aria-label="North">N<span>↑</span></div><div class="legend" id="legend"></div><div id="mapMessage" class="map-message">Reference area only · impact footprint pending</div><div class="locator" aria-label="Locator map"><div id="locatorMap"></div><span id="locatorLabel">LOCATION</span></div></div>
+ <div class="map-foot"><span id="scopeNote"></span><label id="facilityControl" hidden><input type="checkbox" id="facilities"> Show service locations</label></div></section></main></div>
+ <dialog id="sourceDialog"><div class="dialog-top"><div><p class="eyebrow">EVIDENCE &amp; LIMITATIONS</p><h2>Sources and data</h2></div><button class="close" aria-label="Close sources">×</button></div><div class="dialog-body"><p class="intro" id="boundarySource"></p><div class="download-links"><button id="exportEvent">Export current event</button><a href="downloads/Event_Template.json" download>Blank event template</a><a href="downloads/Event_Guide.md" download>Event preparation guide</a><a id="legacyEvidence" href="downloads/Idai_Demo_v1_Data.zip" download>Idai analysis files</a><a href="downloads/Field_Verification_Template.csv" download>Field verification template</a></div><details><summary>How exposure and change are calculated</summary><div id="methods"></div></details><div id="sourceList"></div></div></dialog>
+@@ -20,7 +20,7 @@
+ <dialog id="catalogDialog"><div class="dialog-top"><div><p class="eyebrow">STEP 1 · EVENT</p><h2>Find an event</h2></div><button class="close" aria-label="Close event catalogue">×</button></div><div class="dialog-body"><p class="intro">Search GDACS for historical events or current alerts. Upcoming impacts can only be assessed where a forecast exists. The catalogue start date is not necessarily local landfall; confirm your trigger before analysis.</p><form id="catalogForm" class="event-form"><div class="form-grid"><label>From date<input id="catalogFrom" type="date" required aria-describedby="catalogFromHelp"><small id="catalogFromHelp" class="field-help">Start of the search period. For a past disaster, include the days before impact.</small></label><label>To date<input id="catalogTo" type="date" required aria-describedby="catalogToHelp"><small id="catalogToHelp" class="field-help">End of the search period. Current alerts uses the last 30 days.</small></label><label>Hazard<select id="catalogHazard"><option value="TC;FL">Cyclones and floods</option value="TC">Cyclones</option><option value="FL">Floods</option></select></label><label>Country ISO3 (optional)<input id="catalogCountry" maxlength="3" placeholder="e.g. MOZ" aria-describedby="catalogCountryHelp"><small id="catalogCountryHelp" class="field-help">Optional three-letter country code: MOZ = Mozambique, KEN = Kenya. Leave blank to search all countries.</small></label></div><button type="submit" class="primary">Search GDACS</button><button type="button" id="currentAlerts">Current alerts</button><button type="button" id="catalogNext" hidden>Next 100</button></form><p id="catalogStatus" role="status"></p><div id="catalogResults"></div></div></dialog>
+ <dialog id="assessmentDialog"><div class="dialog-top"><div><p class="eyebrow">REPEATABLE EXPOSURE SCREENING</p><h2>Prepare and run</h2></div><button class="close" aria-label="Close assessment setup">×</button></div><div class="dialog-body event-form"><p class="intro">Complete these three sections to prepare a draft briefing. Suggested dates are filled in where possible. Check their source before calculating exposure.</p><div class="setup-guide"><strong id="setupEventName"></strong><ol><li>Check the assessment view and dates.</li><li>Choose the area to assess and the hazard footprint.</li><li>Add the OSM baseline, then calculate exposure.</li></ol><p>All times use <strong>UTC</strong>. For example, 10:00 at UTC+2 is 08:00 UTC. This form does not convert local times automatically.</p></div>
+-<fieldset><legend>1 · Timing and evidence</legend><div class="form-grid"><label>Assessment view<select id="runStage"><option value="first24">First 24 hours after impact</option><option value="forecast">Forecast / preparedness</option><option value="observed">Later / retrospective observation</option></select><small class="field-help">Forecast: before impact. First 24 hours: evidence available by the cutoff. Later: observations or revisions received afterwards.</small></label><label>Agreed trigger / expected impact (UTC)<input id="runTrigger" type="datetime-local" step="0.001" required aria-describedby="runTriggerHelp"><small id="runTriggerHelp" class="field-help"></small></label><label>Footprint observation / valid time (UTC)<input id="hazardTime" type="datetime-local" step="0.001" required aria-describedby="hazardTimeHelp"><small id="hazardTimeHelp" class="field-help">Enter when the image was acquired or the forecast is valid. Read this from the hazard product; do not use its download date.</small></label><label>Footprint published / available (UTC)<input id="hazardAvailable" type="datetime-local" step="0.001" required aria-describedby="hazardAvailableHelp"><small id="hazardAvailableHelp" class="field-help">Enter when this product became available. A first-day replay excludes products released after the cutoff.</small></label></div><div class="date-summary"><span>First-day information cutoff · calculated automatically</span><output id="cutoffPreview" aria-live="polite">Choose a trigger date</output><small>Trigger + 24 hours. Updating the trigger also updates this cutoff.</small></div><label id="triggerReviewLabel" hidden><input id="triggerReview" type="checkbox"> I checked that the suggested trigger matches local impact / landfall, or corrected it.</label><p id="timingGuidance" class="field-help" role="status"></p><label>Hazard footprint source and meaning<input id="hazardSource" placeholder="e.g. Copernicus EMSR… · observed floodwater · product version" required aria-describedby="hazardSourceHelp"><small id="hazardSourceHelp" class="field-help">Name the provider, product/version and what the polygon means. Example: observed floodwater or modelled winds above a stated speed.</small></label></fieldset>
++<fieldset><legend>1 · Timing and evidence</legend><div class="form-grid"><label>Assessment view<select id="runStage"><option value="first24">First 24 hours after impact</option><option value="forecast">Forecast / preparedness</option><option value="observed">Later / retrospective observation</option></select><small class="field-help">Forecast: before impact. First 24 hours: evidence available by the cutoff. Later: observations or revisions received afterwards.</small></label><label>Agreed trigger / expected impact (UTC)<input id="runTrigger" type="datetime-local" step="0.001" required aria-describedby="runTriggerHelp"><small id="runTriggerHelp" class="field-help"></small></label><div><strong>Map timing</strong><p id="mapTiming" role="status"></p><details id="mapDates"><summary>Check or add map dates</summary><p>Use the dates printed by the map provider. Times below are in <span id="mapZone"></span>.</p><label>When was the area observed or forecast for?<input id="mapLocal" type="datetime-local" step="any"></label><label>When was the map published?<input id="releaseLocal" type="datetime-local" step="any"></label></details><input type="hidden" id="hazardTime"><input type="hidden" id="hazardAvailable"><span hidden id="hazardTimeHelp"></span><span hidden id="hazardAvailableHelp"></span></div></div><div class="date-summary"><span>First-day information cutoff · calculated automatically</span><output id="cutoffPreview" aria-live="polite">Choose a trigger date</output><small>Trigger + 24 hours. Updating the trigger also updates this cutoff.</small></div><label id="triggerReviewLabel" hidden><input id="triggerReview" type="checkbox"> I checked that the suggested trigger matches local impact / landfall, or corrected it.</label><p id="timingGuidance" class="field-help" role="status"></p><label>Hazard footprint source and meaning<input id="hazardSource" placeholder="e.g. Copernicus EMSR… · observed floodwater · product version" required aria-describedby="hazardSourceHelp"><small id="hazardSourceHelp" class="field-help">Name the provider, product/version and what the polygon means. Example: observed floodwater or modelled winds above a stated speed.</small></label></fieldset>
+ <fieldset><legend>2 · Assessment boundary and hazard</legend><p>Import a working AOI and a hazard polygon in WGS84 GeoJSON. A cyclone track or forecast cone alone is not a measured hazard footprint.</p><div class="file-grid"><label>Working assessment boundary<input id="aoiFile" type="file" accept=".json,.geojson" aria-describedby="aoiHelp"><small id="aoiHelp" class="field-help">The area you want to assess, such as a district or selected affected-area boundary. Use polygon GeoJSON in EPSG:4326; this is separate from the hazard footprint.</small></label><label>Hazard footprint<input id="hazardFile" type="file" accept=".json,.geojson" aria-describedby="hazardFileHelp"><small id="hazardFileHelp" class="field-help">The observed or forecast hazard polygon, such as mapped floodwater. Importing a new file clears old hazard dates unless its metadata provides them.</small></label></div><div id="gdacsGeometryControls" hidden><button id="loadGdacsGeometry" type="button">Load available GDACS geometries</button><select id="gdacsPolygon" aria-label="GDACS polygon" aria-describedby="gdacsHelp"></select><button id="useGdacsAoi" type="button">Use as working AOI</button><button id="useGdacsHazard" type="button">Use as hazard footprint</button><p id="gdacsHelp">Load the choices, select the relevant threshold, then assign its role. “Use as hazard footprint” fills dates and source information supplied by GDACS. Missing dates stay blank. A later archive revision may be unsuitable for first-day replay.</p></div><p id="geometryStatus"></p></fieldset>
+-<fieldset><legend>3 · OSM baseline</legend><p>Import an OSM GeoJSON export for the whole AOI, or request a small-area extract. Snapshot date matters for a historical replay. Population is not estimated from building counts.</p><label>OSM snapshot (UTC)<input id="osmSnapshot" type="datetime-local" step="0.001" required aria-describedby="osmSnapshotHelp"><small id="osmSnapshotHelp" class="field-help"></small></label><label>OSM GeoJSON (buildings, roads, health, schools, water and shelters)<input id="osmFile" type="file" accept=".json,.geojson" aria-describedby="osmFileHelp"><small id="osmFileHelp" class="field-help">Use an OSM GeoJSON export covering the entire assessment area, with original OSM IDs and feature tags. Enter its actual snapshot time; do not assume the suggested fetch date describes an imported file.</small></label><button id="fetchOsm" type="button">Fetch OSM for this AOI</button><p>Demo limit: bounding box ≤ 2,500 km² and ≤ 15,000 returned elements. Larger areas: use a prepared HOT Export / GIS extract. Public Overpass may be unavailable; the verification request was rejected in this environment. Import a prepared extract if fetching fails. No automatic retries.</p><p id="osmStatus"></p><label><input id="osmCoverageConfirm" type="checkbox"> I checked that the extract covers the complete AOI and the required feature categories.</label></fieldset>
++<fieldset><legend>3 · OSM baseline</legend><p>Import an OSM GeoJSON export for the whole AOI, or check and fetch a bounded-area extract. Snapshot date matters for a historical replay. Population is not estimated from building counts.</p><label>OSM snapshot (UTC)<input id="osmSnapshot" type="datetime-local" step="0.001" required aria-describedby="osmSnapshotHelp"><small id="osmSnapshotHelp" class="field-help"></small></label><label>OSM GeoJSON (buildings, roads, health, schools, water and shelters)<input id="osmFile" type="file" accept=".json,.geojson" aria-describedby="osmFileHelp"><small id="osmFileHelp" class="field-help">Use an OSM GeoJSON export covering the entire assessment area, with original OSM IDs and feature tags. Enter its actual snapshot time; do not assume the suggested fetch date describes an imported file.</small></label><p id="osmAreaSummary" class="field-help" role="status"></p><button id="fetchOsm" type="button">Check size &amp; fetch OSM</button><p>Browser requests cover a bounding box up to 50,000 km². A count-only check runs first; geometry is downloaded only when the selection contains at most 15,000 OSM elements. Public Overpass requests can time out or be unavailable. No automatic retries or partial results.</p><details id="preparedOsmHelp"><summary>Large area or download unavailable? Use prepared data</summary><ol><li><button id="downloadOsmAoi" type="button">Download assessment boundary</button> Use this GeoJSON to request or clip data for the complete AOI.</li><li>For a current baseline, obtain buildings, roads, health, education, water and shelter features from <a href="https://export.hotosm.org/" target="_blank" rel="noopener noreferrer">HOT Export Tool</a> or your GIS team. For historical events, request a historical OSM snapshot; a current export cannot be relabelled as historical.</li><li>Combine the relevant layers into a WGS84 (EPSG:4326) GeoJSON FeatureCollection, preserving OSM IDs and tags. Import it above and enter its actual snapshot timestamp.</li><li>Browser imports remain limited to 25 MB and 15,000 features. For larger datasets, calculate exposure for the full AOI in GIS, then use <strong>Import data</strong> with a reviewed event package. Do not drop features or shrink the assessment boundary solely to fit the demo.</li></ol><p>Need only the existing Idai demonstration? Close this form and select <strong>Later observations</strong> to view the prepared sample results; refetching OSM is optional.</p></details><p id="osmStatus"></p><label><input id="osmCoverageConfirm" type="checkbox"> I checked that the extract covers the complete AOI and the required feature categories.</label></fieldset>
+ <div class="setup-guide"><strong>Before you calculate</strong><p id="setupChecklist" role="status">Check dates, boundary, hazard and OSM coverage.</p><small>Results are a draft exposure estimate. Export the event package to keep your inputs and results after closing this tab.</small></div><p id="runStatus" role="status"></p><button id="runAssessment" type="button" class="primary">Calculate exposure and build briefing</button><p class="note">A draft screening result still needs analyst review and field verification. For a first-day replay, the footprint acquisition, release and OSM snapshot must be no later than trigger + 24 hours. A late archive revision is kept in the retrospective view.</p></div></dialog>
+ <dialog id="newDialog"><div class="dialog-top"><h2>Start a new event</h2><button class="close" aria-label="Close new event">×</button></div><form id="newForm" class="dialog-body event-form"><label>Event name<input id="newName" required maxlength="120" placeholder="e.g. River flooding — district name" aria-describedby="newNameHelp"><small id="newNameHelp" class="field-help">Use a clear name and year, for example Cyclone Idai — 2019.</small></label><label>Country / region<input id="newCountry" required maxlength="100" aria-describedby="newCountryHelp"><small id="newCountryHelp" class="field-help">Name the country or region covered by your assessment.</small></label><label>Hazard<select id="newHazard"><option>Flood</option><option>Cyclone</option><option>Cyclone and flooding</option><option>Other hazard</option></select></label><label>Event trigger (UTC)<input id="newOnset" type="datetime-local" required aria-describedby="newOnsetHelp"><small id="newOnsetHelp" class="field-help">Enter the agreed local impact / landfall time in UTC, or expected impact time for a forecast. The cutoff is calculated as +24 hours.</small></label><div class="date-summary"><span>Calculated first-day cutoff</span><output id="newCutoffPreview" aria-live="polite">Choose an event trigger</output></div><p>The first-day cutoff is set to trigger + 24 hours. This starts an empty draft; add boundaries, evidence and reviewed statistics through the event template.</p><button class="primary" type="submit">Create empty briefing</button></form></dialog><div class="toast" id="toast" role="status" hidden></div>
+--- a/style.css
++++ b/style.css
+@@ -16,2 +16,12 @@
+ /* Author credit, shared across every event. */
+ .control-panel footer{flex-wrap:wrap}.developer-credit{flex-basis:100%;margin:14px 0 0;text-align:center;font-size:11px;line-height:1.6;color:var(--muted)}.developer-credit strong{font-weight:600;color:var(--ink)}
++
++.map-toolstrip{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;padding:8px 16px;background:#f6f8f8;border-block:1px solid #dce4e6;font-size:11px;color:#40535c}
++.map-toolstrip label{display:flex;gap:7px;align-items:center;font-weight:650}
++.map-toolstrip select{padding:5px 7px;font-size:12px;color:#173741;border:1px solid #aabdc2;background:white;border-radius:4px}
++#baseStatus{flex:1;font-size:11px;min-width:140px}.map-toolstrip [hidden]{display:none!important}#hazardOpacity{width:75px;accent-color:#17768d}
++.place-label{background:transparent;box-shadow:none;border:none;padding:1px 2px;color:#243f48;font-weight:600;font-size:11px;text-shadow:-1px -1px white,1px -1px white,-1px 1px white,1px 1px white}
++.place-label:before{display:none}.district-label{font-size:10px;color:#474557;text-transform:uppercase;letter-spacing:.65px;opacity:.9}
++.street-mode .leaflet-streetTiles-pane,.street-mode .leaflet-street-tiles-pane{filter:saturate(.48) contrast(.92) brightness(1.03)}
++@media(max-width:620px){.map-toolstrip{padding:6px 9px;gap:5px 8px}.map-toolstrip label{font-size:10px}#baseStatus{font-size:10px}}
++@media print{.map-toolstrip{display:none}}
+--- /dev/null
++++ b/observed-tiles.js
+@@ -0,0 +1,13 @@
++/* Display only: the original source polygons are retained for assessment and export. */
++window.RNATileOverlay=Object.freeze({
++ make(L,{opacity=0.7,onError}={}){
++  const layer=L.tileLayer('data/tiles/idai-flood-v1/{z}/{x}/{y}.png',{
++   bounds:[[-20.2,34.2],[-19.2,35]],pane:'flood',noWrap:true,tileSize:256,
++   minZoom:0,maxNativeZoom:12,maxZoom:20,opacity,keepBuffer:1,updateWhenIdle:true,
++   attribution:'<a href="https://unosat.org/products/2701">UNITAR-UNOSAT</a> / Copernicus ESA Sentinel-1 · CC BY-NC 3.0'
++  });
++  layer.setStyle=style=>layer.setOpacity(style.fillOpacity);
++  layer.once('tileerror',()=>{if(onError)onError();});
++  return layer;
++ }
++});
+--- /dev/null
++++ b/_build/build_observed_tiles.py
+@@ -0,0 +1,68 @@
++"""Build a static XYZ PNG portrayal and TileJSON for the published Idai observation.
++Usage: python build_observed_tiles.py <site-root> [public-base-url]
++Only the Python standard library is needed. The source geometry is never modified.
++"""
++import json, math, struct, sys, zlib
++from pathlib import Path
++
++def project(p):
++    return ((p[0]+180)/360, (1-math.asinh(math.tan(math.radians(p[1])))/math.pi)/2)
++
++def chunk(tag,data):
++    return struct.pack('!I',len(data))+tag+data+struct.pack('!I',zlib.crc32(tag+data)&0xffffffff)
++
++def png(raw):
++    return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!IIBBBBB',256,256,8,3,0,0,0))+
++            chunk(b'PLTE',bytes([23,118,141])*5)+chunk(b'tRNS',bytes([0,64,128,191,255]))+
++            chunk(b'IDAT',zlib.compress(raw,7))+chunk(b'IEND',b''))
++
++def main(root,base):
++    event=json.loads((root/'data/idai-event.json').read_text())
++    assert event['event']['id']=='idai-2019' and event['stages']['observed']['asOf'].startswith('20 March 2019')
++    polygons=[]
++    for f in event['layers']['observed']['features']:
++        g=f['geometry']; assert g['type'] in ('Polygon','MultiPolygon')
++        for polygon in ([g['coordinates']] if g['type']=='Polygon' else g['coordinates']):
++            polygons.append([[project(point) for point in ring] for ring in polygon])
++    bounds=[34.2,-20.2,35.0,-19.2]   # fixed release identity; fail instead of cropping a changed source
++    xmin,ymin=project([bounds[0],bounds[3]]);xmax,ymax=project([bounds[2],bounds[1]])
++    assert all(xmin-1e-12<=x<=xmax+1e-12 and ymin-1e-12<=y<=ymax+1e-12 for poly in polygons for ring in poly for x,y in ring)
++    dest=root/'data/tiles/idai-flood-v1';dest.mkdir(parents=True,exist_ok=True)
++    count=0;total=0
++    for zoom in range(13):
++        n=2**zoom; x0,x1=math.floor(xmin*n),math.floor(xmax*n);y0,y1=math.floor(ymin*n),math.floor(ymax*n)
++        # Two by two supersampling, using even/odd scanline fill within each polygon.
++        width=(x1-x0+1)*512;height=(y1-y0+1)*512; pixels=[bytearray(width) for _ in range(height)]
++        for poly in polygons:
++            crosses={}
++            for ring in poly:
++                prev=ring[-1]
++                for cur in ring:
++                    ax,ay=(prev[0]*n-x0)*512,(prev[1]*n-y0)*512
++                    bx,by=(cur[0]*n-x0)*512,(cur[1]*n-y0)*512;prev=cur
++                    if ay==by: continue
++                    for y in range(max(0,math.ceil(min(ay,by)-.5)), min(height,math.ceil(max(ay,by)-.5))):
++                        crosses.setdefault(y,[]).append(ax+(y+.5-ay)*(bx-ax)/(by-ay))
++            for y,xs in crosses.items():
++                xs.sort();assert len(xs)%2==0
++                for left,right in zip(xs[::2],xs[1::2]):
++                    a=max(0,math.ceil(left-.5));b=min(width,math.ceil(right-.5))
++                    if b>a:pixels[y][a:b]=b'\x01'*(b-a)
++        for xt in range(x0,x1+1):
++            tilecol=dest/str(zoom)/str(xt);tilecol.mkdir(parents=True,exist_ok=True)
++            a=(xt-x0)*512;b=a+512
++            for yt in range(y0,y1+1):
++                lines=bytearray();start=(yt-y0)*512
++                for y in range(start,start+512,2):
++                    row=pixels[y][a:b];nxt=pixels[y+1][a:b];lines.append(0)
++                    lines.extend(i+j+k+l for i,j,k,l in zip(row[::2],row[1::2],nxt[::2],nxt[1::2]))
++                data=png(lines);(tilecol/(str(yt)+'.png')).write_bytes(data);total+=len(data);count+=1
++    spec={'tilejson':'3.0.0','name':'Idai: mapped floodwater, 20 March 2019','version':'1.0.0',
++          'description':'Transparent map portrayal of the retrospective UNOSAT observation; not first-day evidence or an analytical raster.',
++          'attribution':'<a href="https://unosat.org/products/2701">UNITAR-UNOSAT</a> / Copernicus ESA Sentinel-1 · CC BY-NC 3.0',
++          'tiles':[base.rstrip('/')+'/data/tiles/idai-flood-v1/{z}/{x}/{y}.png'],
++          'bounds':bounds,'minzoom':0,'maxzoom':12,'scheme':'xyz'}
++    (dest/'tilejson.json').write_text(json.dumps(spec,indent=2)+'\n')
++    print(f'{len(polygons)} source polygons -> {count} PNG tiles, {total:,} bytes')
++if __name__=='__main__':
++    main(Path(sys.argv[1]),sys.argv[2] if len(sys.argv)>2 else 'https://kebutt.github.io/24_hour_Rapid_needs-Assessment')
+--- /dev/null
++++ b/_build/split_sample.py
+@@ -0,0 +1,16 @@
++"""Build fast sample assets without changing coordinates, provenance, or metrics.
++
++Usage: python split_sample.py DIRECTORY_CONTAINING_INDEX_HTML
++The full portable event is retained for direct download / backward compatibility.
++"""
++from pathlib import Path
++import json, sys
++folder = Path(sys.argv[1]) / "data"
++sample = json.loads((folder / "idai-event.json").read_text(encoding="utf-8"))
++later = {}
++for name in ("observed", "change_new", "change_persistent", "change_receded"):
++    if name in sample["layers"]:
++        later[name] = sample["layers"][name]
++        sample["layers"][name] = {"type": "FeatureCollection", "features": []}
++for name, value in (("idai-first-day-v1.json", sample), ("idai-later-layers-v1.json", later)):
++    (folder / name).write_text(json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False), encoding="utf-8")

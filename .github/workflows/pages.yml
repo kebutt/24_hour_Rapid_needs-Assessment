@@ -47,6 +47,78 @@ jobs:
           assert (output / "index.html").is_file(), "Missing dashboard homepage"
           assert (output / "data/idai-event.json").is_file(), "Missing sample event"
           print("Dashboard files prepared")
+      - name: Apply large-area OSM fix
+        shell: python
+        run: |
+          """Apply the larger-AOI OSM screening fix to the packaged static dashboard."""
+          from pathlib import Path
+          import sys
+          
+          root = Path(sys.argv[1] if len(sys.argv) > 1 else '_site')
+          p = root / 'workflow.js'
+          s = p.read_text()
+          start = s.index(' async function fetchOsm(){')
+          end = s.index(' async function loadGdacsGeometry()', start)
+          s = s[:start] + r'''
+           const OSM_MAX_ELEMENTS=15000, OSM_MAX_AREA=50000;
+           let osmFetching=false;
+           function osmQuery(b,snapshot,count=false){
+            const box=[b[1],b[0],b[3],b[2]].join(',');
+            return `[out:json][timeout:35][maxsize:33554432][date:"${snapshot}"];(nwr[building](${box});way[highway](${box});nwr[healthcare](${box});nwr[amenity~"^(hospital|clinic|doctors|health_post|school|kindergarten|college|university|drinking_water|water_point|shelter|social_facility)$"](${box});nwr[man_made~"^(water_well|water_tap|water_works)$"](${box}););${count?'out count;':'out body geom;'}`;
+           }
+           function downloadAoi(){try{
+            requirePolygons(work.aoi);
+            const blob=new Blob([JSON.stringify(work.aoi,null,2)],{type:'application/geo+json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+            a.href=url;a.download='RNA_Assessment_Boundary.geojson';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+           }catch(e){status('osmStatus','Add an assessment boundary before downloading it.');}}
+           function updateOsmArea(){
+            if(!$('osmAreaSummary'))return;
+            if(!work.aoi?.features?.length){status('osmAreaSummary','Add an assessment boundary to check its size.');return;}
+            const b=turf.bbox(work.aoi),area=turf.area(turf.bboxPolygon(b))/1e6;
+            status('osmAreaSummary',`Assessment polygon area: ${format(turf.area(work.aoi)/1e6)} km². Download bounding box: ${format(area)} km². `+(area>OSM_MAX_AREA?'This exceeds the 50,000 km² browser request ceiling; use the prepared-data route below.':'The feature count is checked before geometry is downloaded. The complete assessment boundary is retained.'));
+           }
+           async function fetchOsm(){
+            if(osmFetching)return;
+            osmFetching=true;const button=$('fetchOsm'),target=work;button.disabled=true;
+            status('osmStatus','Checking how many OSM elements are available at the selected snapshot…');
+            try{
+             requirePolygons(target.aoi);const boundary=JSON.stringify(target.aoi),b=turf.bbox(target.aoi),area=turf.area(turf.bboxPolygon(b))/1e6;
+             if(b[2]-b[0]>180||b[3]-b[1]>20||area>OSM_MAX_AREA)throw Error(`The download bounding box is ${format(area)} km². Browser requests support up to 50,000 km². Use the prepared-data route below for the complete AOI.`);
+             const snapshot=RNADates.iso(utc($('osmSnapshot').value));if(!snapshot||Date.parse(snapshot)>Date.now())throw Error('Choose an OSM snapshot time in the past.');
+             const options=q=>({method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({data:q})});
+             const stillCurrent=()=>work===target&&JSON.stringify(work.aoi)===boundary&&Date.parse(utc($('osmSnapshot').value))===Date.parse(snapshot);
+             const counts=await request('https://overpass-api.de/api/interpreter',options(osmQuery(b,snapshot,true)));
+             if(!stillCurrent())throw Error('The event, boundary or snapshot changed during the request. Run the check again for the new inputs.');
+             const countRows=counts.elements?.filter(e=>e.type==='count')||[],raw=countRows[0]?.tags?.total;
+             if(countRows.length!==1||!/^\d+$/.test(String(raw??'')))throw Error('The OSM service did not return a complete feature count. No geometry was downloaded.');
+             const count=Number(raw);if(!Number.isSafeInteger(count))throw Error('Invalid OSM feature count.');
+             if(count>OSM_MAX_ELEMENTS)throw Error(`${count.toLocaleString('en')} mapped elements were found in the download bounding box. This exceeds the 15,000-element browser limit. No partial dataset was loaded. Use GIS processing for the full AOI and import reviewed results, or a complete GeoJSON extract within the limits below.`);
+             status('osmStatus',`${count.toLocaleString('en')} mapped elements found across ${format(area)} km². Downloading the complete selection…`);
+             const j=count?await request('https://overpass-api.de/api/interpreter',options(osmQuery(b,snapshot))):{elements:[]};
+             if(!stillCurrent())throw Error('The event, boundary or snapshot changed during the request. Download discarded; run again for the new inputs.');
+             if(!Array.isArray(j.elements)||j.elements.length!==count||j.elements.length>OSM_MAX_ELEMENTS)throw Error('The returned OSM selection is incomplete or differs from its count. It was not loaded.');
+             const converted=osmtogeojson(j,{flatProperties:true});
+             if(converted.type!=='FeatureCollection'||!Array.isArray(converted.features)||converted.features.length>OSM_MAX_ELEMENTS)throw Error('Converted OSM data exceeds the browser analysis limit or is invalid.');
+             target.osm=converted;target.osmLoaded=true;target.osmSnapshot=snapshot;target.snapshotAutomatic=false;target.osmRetrievedAt=new Date().toISOString();
+             $('osmCoverageConfirm').checked=false;
+             status('osmStatus',`${converted.features.length.toLocaleString('en')} OSM features received. Snapshot ${snapshot}. Full bounding-box selection downloaded; analysis clips it to your AOI. Check mapping completeness before analysis. Empty or missing OSM features do not prove that no infrastructure exists.`);
+            }catch(e){if(work===target)status('osmStatus','OSM data not loaded: '+e.message+' Existing input retained. If the public service is unavailable, use the prepared-data route below.');}
+            finally{osmFetching=false;button.disabled=false;refreshGuidance();}
+           }
+          ''' + s[end:]
+          s = s.replace("function geometryStatus(){status", "function geometryStatus(){updateOsmArea();status")
+          s = s.replace("$('fetchOsm').onclick=fetchOsm;", "$('fetchOsm').onclick=fetchOsm;$('downloadOsmAoi').onclick=downloadAoi;")
+          s = s.replace('simplify or split the extract.', 'use GIS processing for the complete AOI and import reviewed event results. Do not truncate the extract to fit.')
+          p.write_text(s)
+          p=root/'index.html';s=p.read_text()
+          old='<button id="fetchOsm" type="button">Fetch OSM for this AOI</button><p>Demo limit: bounding box ≤ 2,500 km² and ≤ 15,000 returned elements. Larger areas: use a prepared HOT Export / GIS extract. Public Overpass may be unavailable; the verification request was rejected in this environment. Import a prepared extract if fetching fails. No automatic retries.</p>'
+          new='''<p id="osmAreaSummary" class="field-help" role="status"></p><button id="fetchOsm" type="button">Check size &amp; fetch OSM</button><p>Browser requests cover a bounding box up to 50,000 km². A count-only check runs first; geometry is downloaded only when the selection contains at most 15,000 OSM elements. Public Overpass requests can time out or be unavailable. No automatic retries or partial results.</p><details id="preparedOsmHelp"><summary>Large area or download unavailable? Use prepared data</summary><ol><li><button id="downloadOsmAoi" type="button">Download assessment boundary</button> Use this GeoJSON to request or clip data for the complete AOI.</li><li>For a current baseline, obtain buildings, roads, health, education, water and shelter features from <a href="https://export.hotosm.org/" target="_blank" rel="noopener noreferrer">HOT Export Tool</a> or your GIS team. For historical events, request a historical OSM snapshot; a current export cannot be relabelled as historical.</li><li>Combine the relevant layers into a WGS84 (EPSG:4326) GeoJSON FeatureCollection, preserving OSM IDs and tags. Import it above and enter its actual snapshot timestamp.</li><li>Browser imports remain limited to 25 MB and 15,000 features. For larger datasets, calculate exposure for the full AOI in GIS, then use <strong>Import data</strong> with a reviewed event package. Do not drop features or shrink the assessment boundary solely to fit the demo.</li></ol><p>Need only the existing Idai demonstration? Close this form and select <strong>Later observations</strong> to view the prepared sample results; refetching OSM is optional.</p></details>'''
+          if old not in s: raise RuntimeError('Expected OSM form text missing; review the package before patching.')
+          s=s.replace(old,new)
+          s=s.replace('or request a small-area extract.', 'or check and fetch a bounded-area extract.')
+          p.write_text(s)
+          print('Applied count-first OSM retrieval and prepared-data guidance')
+          
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
       - name: Upload website

@@ -5,6 +5,7 @@ on:
     paths:
       - 'RNA_Dashboard_GitHub_Ready.zip'
       - 'map-release.patch'
+      - 'new-event.patch'
       - 'docs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
@@ -53,6 +54,7 @@ jobs:
           cd _site
           mkdir -p _build
           patch --batch --forward -p1 < ../map-release.patch
+          patch --batch --forward -p1 < ../new-event.patch
           python _build/split_sample.py .
           python _build/build_observed_tiles.py .
           rm -r _build
@@ -72,13 +74,20 @@ jobs:
               path = Path(filename)
               source = path.read_text()
               path.write_text(source.replace(sample_note, '').replace('Fine-tune assessment', 'Assess'))
-          for name in ('app.js','workflow.js','style.css','observed-tiles.js'):
-              path = Path(name)
-              tag = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
-              dest = path.with_name(f'{path.stem}-{tag}{path.suffix}')
-              dest.write_bytes(path.read_bytes())
+          def fingerprint(name):
+              source = Path(name)
+              tag = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+              dest = source.with_name(f'{source.stem}-{tag}{source.suffix}')
+              dest.write_bytes(source.read_bytes())
+              return dest.name
+          for owner, dependency in [('analysis-worker.js', 'analysis-engine.js'), ('workflow.js', 'analysis-worker.js')]:
+              path = Path(owner)
+              content = path.read_text()
+              assert dependency in content
+              path.write_text(content.replace(dependency, fingerprint(dependency)))
+          for name in ('app.js','workflow.js','style.css','observed-tiles.js','validate.js','catalog-samples.js'):
               assert f'"{name}"' in html, name
-              html = html.replace(f'"{name}"', f'"{dest.name}"')
+              html = html.replace(f'"{name}"', f'"{fingerprint(name)}"')
           page.write_text(html)
           PYTHON
       - name: Configure GitHub Pages

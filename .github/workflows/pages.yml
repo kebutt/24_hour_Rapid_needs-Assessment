@@ -64,6 +64,14 @@ jobs:
           import hashlib
           page = Path('index.html')
           html = page.read_text()
+          heading = '<p class="eyebrow">24-HOUR EVENT BRIEFING</p>'
+          credit = '<p class="developer-credit">Developed with <span role="img" aria-label="love">❤️</span> by <strong>Duncan Kebut</strong></p>'
+          html = html.replace(heading, '').replace(credit, '').replace('Fine-tune assessment', 'Assess')
+          sample_note = 'Historical sample · replace with your event data.'
+          for filename in ('app.js', 'workflow.js', 'downloads/Event_Guide.md', 'downloads/Event_Template.json'):
+              path = Path(filename)
+              source = path.read_text()
+              path.write_text(source.replace(sample_note, '').replace('Fine-tune assessment', 'Assess'))
           for name in ('app.js','workflow.js','style.css','observed-tiles.js'):
               path = Path(name)
               tag = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
